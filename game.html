@@ -3,279 +3,434 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>猫咪抓煤球</title>
+    <title>抓煤球 - 狡猾躲藏版</title>
     <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-            background-color: #EBEBD3; 
-            background-image: radial-gradient(circle, #EBEBD3 20%, #CFCFBB 100%);
-            touch-action: none; /* 禁止默认触控，防止猫爪放大页面 */
-            -webkit-user-select: none;
-            user-select: none;
-            font-family: sans-serif;
-        }
-        #start-screen {
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            display: flex;
+        body { margin: 0; overflow: hidden; background-color: #f0f0f0; touch-action: none; font-family: sans-serif; }
+        canvas { display: block; }
+        #start-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center;
+            color: white; font-size: 24px; z-index: 10; cursor: pointer;
             flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            background: rgba(235, 235, 211, 0.95);
-            z-index: 100;
         }
-        #loading-text { margin-bottom: 20px; color: #555; }
-        .btn {
-            background: #4CAF50; color: white;
-            padding: 20px 60px; font-size: 30px;
-            border-radius: 50px; border: none;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        #score-board {
+            position: absolute; top: 10px; left: 10px; font-size: 20px; font-weight: bold; color: #333; pointer-events: none;
+            background: rgba(255,255,255,0.5); padding: 5px 10px; border-radius: 10px;
         }
+        .instruction { font-size: 14px; margin-top: 10px; color: #ccc; }
     </style>
 </head>
 <body>
 
-<div id="start-screen">
-    <div id="loading-text">正在加载音频文件...</div>
-    <button class="btn" id="start-btn" style="display:none">开始游戏</button>
+<div id="score-board">抓获: 0</div>
+<div id="start-overlay">
+    <div>点击屏幕开始</div>
+    <div class="instruction">每3次冲刺，煤球就会溜出屏幕躲起来...</div>
 </div>
 <canvas id="gameCanvas"></canvas>
 
 <script>
-    const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
-    const startScreen = document.getElementById('start-screen');
-    const startBtn = document.getElementById('start-btn');
-    const loadingText = document.getElementById('loading-text');
+const CONFIG = {
+    MAX_COUNT: 1,         
+    SPAWN_DELAY: 1500,    
+    AUDIO_DELAY: 500,     
+    GOLD_CHANCE: 0.05,    
+    WANDER_SPEED: 2.0,    
+    SPRINT_SPEED: 9.0,    
+    RUN_SPEED: 13.0,      
+    STOP_SOUND_THRESHOLD: 3.5, 
+    SCARE_RADIUS: 180,    
+    HIT_RADIUS: 60
+};
 
-    // --- 1. 加载本地音频文件 ---
-    const audioFiles = {
-        appear: new Audio('./ap.MP3'),
-        move: new Audio('./move.MP3')
-    };
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let score = 0;
+let gameRunning = false;
+let nextSpawnTime = 0;
 
-    // 配置移动音频循环
-    audioFiles.move.loop = true;
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
 
-    // 检查加载状态
-    let loadedCount = 0;
-    const totalAudio = 2;
+// --- 🎵 音效管理器 ---
+const SoundMgr = {
+    s_appear: new Audio('./ap.mp3'),
+    s_move: new Audio('./move.mp3'),
+    ctx: null,
 
-    function checkLoad() {
-        loadedCount++;
-        if (loadedCount >= totalAudio) {
-            loadingText.innerText = "准备就绪！请确保 iPad 未静音";
-            startBtn.style.display = "block";
-        }
-    }
-
-    // 绑定加载事件 (兼容 iOS)
-    audioFiles.appear.addEventListener('canplaythrough', checkLoad, {once:true});
-    audioFiles.move.addEventListener('canplaythrough', checkLoad, {once:true});
-    // 容错：如果文件很小或者加载极快，直接显示按钮
-    setTimeout(() => {
-        if(startBtn.style.display === 'none') {
-            loadingText.innerText = "如无法点击开始，请检查文件名是否正确";
-            startBtn.style.display = "block";
-        }
-    }, 2000);
-
-    // --- 2. 合成被抓音效 (啾啾声) ---
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    let audioCtx;
-
-    function playCaughtSound() {
-        if (!audioCtx) return;
-        const t = audioCtx.currentTime;
-        const osc = audioCtx.createOscillator();
-        const gainNode = audioCtx.createGain();
-        osc.connect(gainNode);
-        gainNode.connect(audioCtx.destination);
-        
-        osc.frequency.setValueAtTime(1500, t);
-        osc.frequency.exponentialRampToValueAtTime(500, t + 0.15);
-        
-        gainNode.gain.setValueAtTime(0, t);
-        gainNode.gain.linearRampToValueAtTime(0.8, t + 0.01);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
-        
-        osc.type = 'sine';
-        osc.start(t);
-        osc.stop(t + 0.2);
-    }
-
-    // --- 3. 游戏逻辑 ---
-    let gameRunning = false;
+    init: function() { 
+        if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.s_appear.load();
+        this.s_move.load();
+        this.s_move.loop = true; 
+    },
     
-    function resize() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    playAppear: function() {
+        this.s_appear.currentTime = 0;
+        this.s_appear.play().catch(e=>{});
+    },
+    
+    ensurePlaying: function() {
+        if (this.s_move.paused) {
+            this.s_move.play().catch(e=>{});
+        }
+    },
+
+    ensureStopped: function() {
+        if (!this.s_move.paused) {
+            this.s_move.pause();
+            this.s_move.currentTime = 0; 
+        }
+    },
+
+    playPop: function() { 
+        if(!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(200, this.ctx.currentTime);
+        gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + 0.1);
+    },
+    
+    playGold: function() {
+        if(!this.ctx) return;
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1500, t);
+        gain.gain.setValueAtTime(0.2, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.5);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(t + 0.5);
     }
-    window.addEventListener('resize', resize);
-    resize();
+};
 
-    const tadpole = {
-        x: -100, y: -100, targetX: 0, targetY: 0,
-        size: 35, tailPath: [],
-        state: 'HIDDEN', stateTimer: 0,
-        angle: 0, speed: 0,
+// --- 视觉特效 ---
+class PawPrint {
+    constructor(x, y) {
+        this.x = x; this.y = y; this.life = 1.0; this.angle = Math.random()*6.28;
+    }
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+        ctx.globalAlpha = this.life; ctx.fillStyle = 'rgba(255, 182, 193, 0.8)';
+        ctx.beginPath(); ctx.ellipse(0, 0, 20, 15, 0, 0, Math.PI*2); ctx.fill();
+        [[-18,-20],[-6,-28],[6,-28],[18,-20]].forEach(t=>{
+            ctx.beginPath(); ctx.arc(t[0],t[1],8,0,Math.PI*2); ctx.fill();
+        });
+        ctx.restore(); this.life -= 0.01;
+    }
+}
+
+class Particle {
+    constructor(x, y, isGold) {
+        this.x = x; this.y = y; this.isGold = isGold;
+        this.size = Math.random()*4+2; this.life = 1.0;
+        this.vx = (Math.random()-0.5)*3; this.vy = (Math.random()-0.5)*3;
+    }
+    update() { this.x+=this.vx; this.y+=this.vy; this.life-=0.03; this.size*=0.9; }
+    draw(ctx) {
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.isGold ? '#FFD700' : '#333';
+        ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+// --- 煤球类 ---
+class CoalBall {
+    constructor() {
+        this.sprintCounter = 0; // 记录冲刺次数
+        this.reset(true); // true 表示第一次生成
+    }
+
+    reset(isFirstSpawn) {
+        this.isGold = Math.random() < CONFIG.GOLD_CHANCE;
+        this.radius = 40 + Math.random() * 10;
         
-        respawn: function() {
-            const side = Math.floor(Math.random() * 4);
-            if (side === 0) { this.x = -50; this.y = Math.random() * canvas.height; }
-            else if (side === 1) { this.x = canvas.width + 50; this.y = Math.random() * canvas.height; }
-            else if (side === 2) { this.x = Math.random() * canvas.width; this.y = -50; }
-            else { this.x = Math.random() * canvas.width; this.y = canvas.height + 50; }
+        // 位置生成逻辑
+        if (Math.random() > 0.5) {
+            this.x = Math.random() > 0.5 ? -60 : canvas.width + 60;
+            this.y = Math.random() * canvas.height;
+        } else {
+            this.x = Math.random() * canvas.width;
+            this.y = Math.random() > 0.5 ? -60 : canvas.height + 60;
+        }
 
-            this.tailPath = [];
-            for(let i=0; i<10; i++) this.tailPath.push({x: this.x, y: this.y});
-            
-            // 播放出现音频
-            audioFiles.appear.currentTime = 0;
-            audioFiles.appear.play().catch(e => console.log(e));
+        this.state = 'WAITING_FOR_AUDIO';
+        this.visible = false;
+        
+        // 播放出现音效
+        SoundMgr.playAppear();
+        
+        setTimeout(() => {
+            this.state = 'WANDER';
+            this.visible = true;
+        }, CONFIG.AUDIO_DELAY);
 
-            this.state = 'MOVING';
-            this.pickNewTarget();
-        },
+        this.scale = 0.1; 
+        this.angle = Math.atan2(canvas.height/2 - this.y, canvas.width/2 - this.x);
+        this.speed = CONFIG.WANDER_SPEED;
+        this.wanderTimer = 0;
+        this.timer = 0;
+        this.blinkTimer = Math.random() * 200;
+        this.eyeOffset = 0;
+        
+        // 躲藏相关的状态
+        this.isHidingRun = false; 
+        this.hiddenTimer = 0;
+    }
 
-        pickNewTarget: function() {
-            this.targetX = Math.random() * (canvas.width - 100) + 50;
-            this.targetY = Math.random() * (canvas.height - 100) + 50;
-            const dx = this.targetX - this.x;
-            const dy = this.targetY - this.y;
-            this.angle = Math.atan2(dy, dx);
-            this.speed = Math.random() * 6 + 10; 
-            
-            // 播放移动音频
-            if (audioFiles.move.paused) {
-                audioFiles.move.play().catch(e=>{});
+    // --- 统一的冲刺触发器 ---
+    triggerSprint(sourceX, sourceY) {
+        // 如果已经在冲刺或已经躲起来了，忽略
+        if (this.state === 'SCARE' || this.state === 'HIDDEN') return;
+
+        this.sprintCounter++;
+        console.log("冲刺次数:", this.sprintCounter);
+
+        // 每第3次冲刺 (1, 2, [3], 4, 5, [6]...)，触发躲藏模式
+        if (this.sprintCounter % 3 === 0) {
+            this.isHidingRun = true;
+            // 速度加成，确保能跑出去
+            this.speed = (sourceX ? CONFIG.RUN_SPEED : CONFIG.SPRINT_SPEED) * 1.2;
+        } else {
+            this.isHidingRun = false;
+            this.speed = (sourceX ? CONFIG.RUN_SPEED : CONFIG.SPRINT_SPEED) * (this.isGold ? 1.5 : 1);
+        }
+
+        // 计算角度
+        if (sourceX !== undefined) {
+            // 被吓跑：背离触摸点
+            this.angle = Math.atan2(this.y - sourceY, this.x - sourceX) + (Math.random()-0.5);
+        } else {
+            // 自主冲刺：随机微调当前方向
+            this.angle += (Math.random() - 0.5);
+        }
+
+        this.state = 'SCARE';
+    }
+
+    update() {
+        // 如果处于“躲藏中”状态 (HIDDEN)，只倒计时
+        if (this.state === 'HIDDEN') {
+            this.hiddenTimer--;
+            if (this.hiddenTimer <= 0) {
+                // 时间到，重生回来
+                this.reset(false);
             }
-        },
+            return;
+        }
 
-        update: function() {
-            if (this.state === 'HIDDEN') {
-                this.stateTimer--;
-                if (this.stateTimer <= 0) this.respawn();
-                return;
-            }
-            this.tailPath.unshift({x: this.x, y: this.y});
-            if (this.tailPath.length > 15) this.tailPath.pop();
+        if (!this.visible) return; 
 
-            if (this.state === 'MOVING') {
-                const dx = this.targetX - this.x;
-                const dy = this.targetY - this.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist < 15) {
-                    this.enterIdle();
+        this.timer++;
+        
+        // --- WANDER 逻辑 ---
+        if (this.state === 'WANDER') {
+            if (this.scale < 1) this.scale += 0.05;
+
+            this.wanderTimer--;
+            if (this.wanderTimer <= 0) {
+                this.angle += (Math.random() - 0.5) * 3.0; 
+                this.wanderTimer = 40 + Math.random() * 60;
+                
+                // 25% 概率自主冲刺
+                if (Math.random() < 0.25) { 
+                    this.triggerSprint(); // 调用统一的触发器
                 } else {
-                    this.x += Math.cos(this.angle) * this.speed;
-                    this.y += Math.sin(this.angle) * this.speed;
-                }
-            } else if (this.state === 'IDLE') {
-                this.stateTimer--;
-                if (this.stateTimer <= 0) {
-                    if (Math.random() < 0.2) this.vanish(false);
-                    else {
-                        this.state = 'MOVING';
-                        this.pickNewTarget();
-                    }
+                    this.speed = CONFIG.WANDER_SPEED;
                 }
             }
-        },
-        
-        enterIdle: function() {
-            this.state = 'IDLE';
-            this.stateTimer = Math.random() * 40 + 30;
-            audioFiles.move.pause(); // 停下时停止音效
-            audioFiles.move.currentTime = 0;
-        },
+            
+            // 只有在【不是】躲藏跑路的时候，才碰壁反弹
+            if (!this.isHidingRun) {
+                if (this.x < 50) this.angle = 0 + Math.random();
+                if (this.x > canvas.width - 50) this.angle = Math.PI + Math.random();
+                if (this.y < 50) this.angle = Math.PI/2 + Math.random();
+                if (this.y > canvas.height - 50) this.angle = -Math.PI/2 + Math.random();
+            }
 
-        draw: function() {
-            if (this.state === 'HIDDEN') return;
-            // 尾巴
-            ctx.beginPath(); ctx.strokeStyle = 'black'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-            if (this.tailPath.length > 2) {
-                ctx.moveTo(this.tailPath[0].x, this.tailPath[0].y);
-                for (let i = 1; i < this.tailPath.length - 2; i++) {
-                    const xc = (this.tailPath[i].x + this.tailPath[i+1].x) / 2;
-                    const yc = (this.tailPath[i].y + this.tailPath[i+1].y) / 2;
-                    ctx.quadraticCurveTo(this.tailPath[i].x, this.tailPath[i].y, xc, yc);
-                }
-                ctx.lineTo(this.tailPath[this.tailPath.length-1].x, this.tailPath[this.tailPath.length-1].y);
-            }
-            ctx.stroke();
-            // 身体
-            ctx.fillStyle = 'black'; ctx.beginPath();
-            const jitter = (this.state === 'MOVING') ? Math.random() * 2 : 0;
-            ctx.arc(this.x + jitter, this.y + jitter, this.size, 0, Math.PI * 2); ctx.fill();
-            // 眼睛
-            ctx.fillStyle = 'white'; ctx.beginPath();
-            ctx.arc(this.x - 12, this.y - 8, 11, 0, Math.PI * 2);
-            ctx.arc(this.x + 12, this.y - 8, 11, 0, Math.PI * 2); ctx.fill();
-            // 瞳孔
-            const lx = Math.cos(this.angle) * 4, ly = Math.sin(this.angle) * 4;
-            ctx.fillStyle = 'black'; ctx.beginPath();
-            ctx.arc(this.x - 12 + lx, this.y - 8 + ly, 4, 0, Math.PI * 2);
-            ctx.arc(this.x + 12 + lx, this.y - 8 + ly, 4, 0, Math.PI * 2); ctx.fill();
-        },
-
-        vanish: function(caught) {
-            if (caught) playCaughtSound();
-            audioFiles.move.pause();
-            audioFiles.move.currentTime = 0;
-            this.state = 'HIDDEN';
-            this.stateTimer = 50; 
-        },
-        
-        checkHit: function(inputX, inputY) {
-            if (this.state === 'HIDDEN') return false;
-            if (Math.hypot(inputX - this.x, inputY - this.y) < this.size + 40) {
-                this.vanish(true);
-                createRipple(this.x, this.y);
-                return true;
-            }
-            return false;
+            this.eyeOffset = Math.sin(this.timer/40) * 6; 
         }
-    };
+        // --- SCARE (冲刺) 逻辑 ---
+        else if (this.state === 'SCARE') {
+            // 如果不是为了躲藏而跑，就正常减速
+            if (!this.isHidingRun) {
+                this.speed *= 0.96; 
+                if (this.speed < CONFIG.WANDER_SPEED + 1) {
+                    this.state = 'WANDER';
+                }
+            } else {
+                // 如果是躲藏跑，不减速，保持高速冲出去！
+                // 并且检测是否已经跑出屏幕
+                if (this.x < -100 || this.x > canvas.width + 100 || 
+                    this.y < -100 || this.y > canvas.height + 100) {
+                    
+                    // 成功逃脱！进入躲藏状态
+                    this.state = 'HIDDEN';
+                    this.visible = false;
+                    SoundMgr.ensureStopped(); // 跑出去了就没声音了
+                    
+                    // 随机躲 2到5秒 (60fps * 2~5)
+                    this.hiddenTimer = (2 + Math.random() * 3) * 60;
+                    console.log("躲藏中...", this.hiddenTimer);
+                    return;
+                }
+            }
 
-    let ripples = [];
-    function createRipple(x, y) { ripples.push({x: x, y: y, r: 10, alpha: 1}); }
-    function drawRipples() {
-        for (let i = ripples.length - 1; i >= 0; i--) {
-            let r = ripples[i]; r.r += 4; r.alpha -= 0.04;
-            if (r.alpha <= 0) ripples.splice(i, 1);
-            else { ctx.strokeStyle = `rgba(0,0,0,${r.alpha})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI*2); ctx.stroke(); }
+            // 掉渣粒子
+            if (Math.random() > 0.4) particles.push(new Particle(this.x, this.y, this.isGold));
+            this.eyeOffset = 0;
         }
+
+        // --- 音效同步 ---
+        // 注意：HIDDEN状态已经在上面return了，这里不用管
+        if (this.speed > CONFIG.STOP_SOUND_THRESHOLD) {
+            SoundMgr.ensurePlaying();
+        } else {
+            SoundMgr.ensureStopped();
+        }
+
+        // 物理移动
+        let wiggle = Math.sin(this.timer / 4) * 2;
+        this.x += Math.cos(this.angle) * this.speed - Math.sin(this.angle) * wiggle;
+        this.y += Math.sin(this.angle) * this.speed + Math.cos(this.angle) * wiggle;
+
+        this.blinkTimer--;
+        if (this.blinkTimer <= 0) this.blinkTimer = 100 + Math.random() * 300;
     }
 
-    function loop() {
-        if (!gameRunning) return;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        tadpole.update(); tadpole.draw(); drawRipples();
-        requestAnimationFrame(loop);
+    draw(ctx) {
+        if (!this.visible || this.state === 'HIDDEN') return;
+
+        ctx.save();
+        ctx.translate(this.x, this.y);
+
+        let stretch = Math.min(this.speed / 15, 0.4); 
+        let drawAngle = (this.speed > 0.5) ? this.angle : 0;
+        
+        ctx.rotate(drawAngle);
+        ctx.scale(this.scale * (1 + stretch), this.scale * (1 - stretch));
+
+        // 尾巴
+        ctx.beginPath();
+        ctx.moveTo(-this.radius+10, 0);
+        ctx.quadraticCurveTo(-this.radius*2, Math.sin(this.timer/5)*12, -this.radius*2.8, 0);
+        ctx.lineWidth = 7; ctx.strokeStyle = this.isGold?'#DAA520':'#333'; ctx.lineCap='round'; ctx.stroke();
+
+        // 身体
+        ctx.fillStyle = this.isGold ? '#FFD700' : 'black';
+        ctx.beginPath(); ctx.arc(0, 0, this.radius, 0, Math.PI*2); ctx.fill();
+
+        // 眼睛
+        let isBlinking = this.blinkTimer < 5;
+        let eyeScale = (this.state === 'SCARE') ? 1.4 : 1;
+        
+        if (!isBlinking) {
+            ctx.fillStyle = 'white';
+            ctx.beginPath(); ctx.ellipse(12, -9, 9*eyeScale, 7*eyeScale, 0, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(12, 9, 9*eyeScale, 7*eyeScale, 0, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = 'black';
+            let pX = 14 + this.eyeOffset;
+            ctx.beginPath(); ctx.arc(pX, -9, 3.5, 0, Math.PI*2); ctx.arc(pX, 9, 3.5, 0, Math.PI*2); ctx.fill();
+        } else {
+            ctx.strokeStyle = '#666'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(5,-9); ctx.lineTo(19,-9); ctx.moveTo(5,9); ctx.lineTo(19,9); ctx.stroke();
+        }
+
+        ctx.restore();
     }
 
-    canvas.addEventListener('touchstart', e => {
-        e.preventDefault();
-        for (let i=0; i<e.touches.length; i++) {
-            const hit = tadpole.checkHit(e.touches[i].clientX, e.touches[i].clientY);
-            if(!hit) createRipple(e.touches[i].clientX, e.touches[i].clientY);
-        }
-    }, {passive: false});
+    checkInput(ix, iy) {
+        if (!this.visible || this.state === 'HIDDEN') return 'MISS';
 
-    startBtn.addEventListener('click', () => {
-        // 解锁 iOS 音频上下文
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioCtx.state === 'suspended') audioCtx.resume();
+        let dist = Math.sqrt((ix-this.x)**2 + (iy-this.y)**2);
         
-        startScreen.style.display = 'none';
-        gameRunning = true;
-        tadpole.respawn();
-        loop();
-    });
+        if (dist < CONFIG.HIT_RADIUS) return 'HIT';
+        if (dist < CONFIG.SCARE_RADIUS) {
+            // 触发冲刺（传入坐标，表示是被吓跑的）
+            this.triggerSprint(ix, iy);
+            return 'SCARE';
+        }
+        return 'MISS';
+    }
+}
+
+// --- 游戏循环 ---
+let coalBalls = [];
+let particles = [];
+let paws = [];
+
+function loop() {
+    if (!gameRunning) { requestAnimationFrame(loop); return; }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    let now = Date.now();
+
+    // 如果场上没有煤球（都被抓了），且重生时间到了，才生成新的
+    // 注意：如果是“躲藏”状态，coalBalls 数组里依然有对象，只是不显示，所以这里不会触发生成
+    if (coalBalls.length < CONFIG.MAX_COUNT && now > nextSpawnTime) {
+        coalBalls.push(new CoalBall());
+    }
+
+    for(let i=paws.length-1; i>=0; i--) {
+        paws[i].draw(ctx);
+        if(paws[i].life <= 0) paws.splice(i, 1);
+    }
+    for(let i=particles.length-1; i>=0; i--) {
+        particles[i].update(); particles[i].draw(ctx);
+        if(particles[i].life <= 0) particles.splice(i, 1);
+    }
+    for(let i=coalBalls.length-1; i>=0; i--) {
+        let ball = coalBalls[i];
+        ball.update();
+        ball.draw(ctx);
+        if(ball.dead) coalBalls.splice(i, 1);
+    }
+
+    document.getElementById('score-board').innerText = `抓获: ${score}`;
+    requestAnimationFrame(loop);
+}
+
+function handleInput(x, y) {
+    if (!gameRunning) return;
+    paws.push(new PawPrint(x, y));
+    
+    for (let i = coalBalls.length - 1; i >= 0; i--) {
+        let res = coalBalls[i].checkInput(x, y);
+        if (res === 'HIT') {
+            SoundMgr.ensureStopped();
+            if (coalBalls[i].isGold) SoundMgr.playGold();
+            else SoundMgr.playPop();
+            score++;
+            coalBalls[i].dead = true;
+            nextSpawnTime = Date.now() + CONFIG.SPAWN_DELAY;
+        }
+    }
+}
+
+document.getElementById('start-overlay').addEventListener('click', function() {
+    this.style.display = 'none';
+    SoundMgr.init();
+    gameRunning = true;
+    nextSpawnTime = Date.now();
+});
+
+canvas.addEventListener('mousedown', e => handleInput(e.clientX, e.clientY));
+canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    for(let t of e.touches) handleInput(t.clientX, t.clientY);
+}, {passive: false});
+
+loop();
 </script>
 </body>
 </html>
