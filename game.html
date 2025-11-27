@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>抓煤球 - 狡猾躲藏版</title>
+    <title>抓煤球 - 边缘进场版</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #f0f0f0; touch-action: none; font-family: sans-serif; }
         canvas { display: block; }
@@ -25,7 +25,7 @@
 <div id="score-board">抓获: 0</div>
 <div id="start-overlay">
     <div>点击屏幕开始</div>
-    <div class="instruction">每3次冲刺，煤球就会溜出屏幕躲起来...</div>
+    <div class="instruction">从边缘爬入 -> 观察 -> 移动</div>
 </div>
 <canvas id="gameCanvas"></canvas>
 
@@ -33,14 +33,15 @@
 const CONFIG = {
     MAX_COUNT: 1,         
     SPAWN_DELAY: 1500,    
-    AUDIO_DELAY: 500,     
     GOLD_CHANCE: 0.05,    
     WANDER_SPEED: 2.0,    
     SPRINT_SPEED: 9.0,    
     RUN_SPEED: 13.0,      
     STOP_SOUND_THRESHOLD: 3.5, 
     SCARE_RADIUS: 180,    
-    HIT_RADIUS: 60
+    HIT_RADIUS: 60,
+    OBSERVE_TIME: 60,     // 观察 60 帧 (约1秒)
+    SAFE_MARGIN: 120      // 进场时，必须爬进屏幕多少距离才开始观察
 };
 
 const canvas = document.getElementById('gameCanvas');
@@ -147,71 +148,74 @@ class Particle {
 // --- 煤球类 ---
 class CoalBall {
     constructor() {
-        this.sprintCounter = 0; // 记录冲刺次数
-        this.reset(true); // true 表示第一次生成
+        this.sprintCounter = 0; 
+        this.reset(true);
     }
 
     reset(isFirstSpawn) {
         this.isGold = Math.random() < CONFIG.GOLD_CHANCE;
         this.radius = 40 + Math.random() * 10;
         
-        // 位置生成逻辑
-        if (Math.random() > 0.5) {
-            this.x = Math.random() > 0.5 ? -60 : canvas.width + 60;
+        // 【修改点】1. 随机从4个边缘外生成
+        const edge = Math.floor(Math.random() * 4); // 0:上, 1:右, 2:下, 3:左
+        const offset = 60; // 稍微在屏幕外一点
+        
+        if (edge === 0) { // Top
+            this.x = Math.random() * canvas.width; 
+            this.y = -offset;
+        } else if (edge === 1) { // Right
+            this.x = canvas.width + offset; 
             this.y = Math.random() * canvas.height;
-        } else {
-            this.x = Math.random() * canvas.width;
-            this.y = Math.random() > 0.5 ? -60 : canvas.height + 60;
+        } else if (edge === 2) { // Bottom
+            this.x = Math.random() * canvas.width; 
+            this.y = canvas.height + offset;
+        } else { // Left
+            this.x = -offset; 
+            this.y = Math.random() * canvas.height;
         }
 
-        this.state = 'WAITING_FOR_AUDIO';
-        this.visible = false;
+        // 初始状态设为 "ENTERING" (进场)
+        this.state = 'ENTERING';
+        this.visible = true;
+        this.scale = 1; // 既然是从外面爬进来，就不需要从小变大的动画了
         
-        // 播放出现音效
+        // 计算一个指向屏幕中心偏随机一点的角度，确保它爬进来
+        let centerX = canvas.width / 2 + (Math.random()-0.5) * 200;
+        let centerY = canvas.height / 2 + (Math.random()-0.5) * 200;
+        this.angle = Math.atan2(centerY - this.y, centerX - this.x);
+        
+        // 播放声音
         SoundMgr.playAppear();
-        
-        setTimeout(() => {
-            this.state = 'WANDER';
-            this.visible = true;
-        }, CONFIG.AUDIO_DELAY);
 
-        this.scale = 0.1; 
-        this.angle = Math.atan2(canvas.height/2 - this.y, canvas.width/2 - this.x);
         this.speed = CONFIG.WANDER_SPEED;
         this.wanderTimer = 0;
         this.timer = 0;
         this.blinkTimer = Math.random() * 200;
         this.eyeOffset = 0;
         
-        // 躲藏相关的状态
+        // 观察倒计时
+        this.observeTimer = CONFIG.OBSERVE_TIME;
+        
         this.isHidingRun = false; 
         this.hiddenTimer = 0;
     }
 
-    // --- 统一的冲刺触发器 ---
     triggerSprint(sourceX, sourceY) {
-        // 如果已经在冲刺或已经躲起来了，忽略
-        if (this.state === 'SCARE' || this.state === 'HIDDEN') return;
+        if (this.state === 'SCARE' || this.state === 'HIDDEN' || this.state === 'ENTERING') return;
 
         this.sprintCounter++;
-        console.log("冲刺次数:", this.sprintCounter);
-
-        // 每第3次冲刺 (1, 2, [3], 4, 5, [6]...)，触发躲藏模式
+        
         if (this.sprintCounter % 3 === 0) {
             this.isHidingRun = true;
-            // 速度加成，确保能跑出去
             this.speed = (sourceX ? CONFIG.RUN_SPEED : CONFIG.SPRINT_SPEED) * 1.2;
         } else {
             this.isHidingRun = false;
             this.speed = (sourceX ? CONFIG.RUN_SPEED : CONFIG.SPRINT_SPEED) * (this.isGold ? 1.5 : 1);
         }
 
-        // 计算角度
         if (sourceX !== undefined) {
-            // 被吓跑：背离触摸点
             this.angle = Math.atan2(this.y - sourceY, this.x - sourceX) + (Math.random()-0.5);
         } else {
-            // 自主冲刺：随机微调当前方向
             this.angle += (Math.random() - 0.5);
         }
 
@@ -219,38 +223,62 @@ class CoalBall {
     }
 
     update() {
-        // 如果处于“躲藏中”状态 (HIDDEN)，只倒计时
         if (this.state === 'HIDDEN') {
             this.hiddenTimer--;
-            if (this.hiddenTimer <= 0) {
-                // 时间到，重生回来
-                this.reset(false);
-            }
+            if (this.hiddenTimer <= 0) this.reset(false);
             return;
         }
 
         if (!this.visible) return; 
 
         this.timer++;
-        
-        // --- WANDER 逻辑 ---
-        if (this.state === 'WANDER') {
-            if (this.scale < 1) this.scale += 0.05;
 
+        // --- 状态机逻辑 ---
+
+        // 1. ENTERING (爬进场)
+        if (this.state === 'ENTERING') {
+            this.speed = CONFIG.WANDER_SPEED; // 正常爬行速度
+            
+            // 检测是否已经进入“安全区”（即离边缘有一定距离）
+            let inSafeZone = (
+                this.x > CONFIG.SAFE_MARGIN && 
+                this.x < canvas.width - CONFIG.SAFE_MARGIN &&
+                this.y > CONFIG.SAFE_MARGIN &&
+                this.y < canvas.height - CONFIG.SAFE_MARGIN
+            );
+
+            if (inSafeZone) {
+                // 到位了，刹车，开始观察
+                this.state = 'OBSERVING';
+                this.speed = 0;
+            }
+        }
+        
+        // 2. OBSERVING (停下观察)
+        else if (this.state === 'OBSERVING') {
+            this.speed = 0;
+            this.observeTimer--;
+            this.eyeOffset = Math.sin(this.timer / 10) * 8; // 左右看
+            
+            if (this.observeTimer <= 0) {
+                this.state = 'WANDER';
+                // 观察完，选个新方向开始走
+                this.angle += (Math.random() - 0.5);
+            }
+        }
+
+        // 3. WANDER (正常游荡)
+        else if (this.state === 'WANDER') {
+            this.speed = CONFIG.WANDER_SPEED;
             this.wanderTimer--;
             if (this.wanderTimer <= 0) {
                 this.angle += (Math.random() - 0.5) * 3.0; 
                 this.wanderTimer = 40 + Math.random() * 60;
                 
-                // 25% 概率自主冲刺
-                if (Math.random() < 0.25) { 
-                    this.triggerSprint(); // 调用统一的触发器
-                } else {
-                    this.speed = CONFIG.WANDER_SPEED;
-                }
+                if (Math.random() < 0.25) this.triggerSprint(); 
             }
             
-            // 只有在【不是】躲藏跑路的时候，才碰壁反弹
+            // 碰壁检测（仅在非躲藏模式下）
             if (!this.isHidingRun) {
                 if (this.x < 50) this.angle = 0 + Math.random();
                 if (this.x > canvas.width - 50) this.angle = Math.PI + Math.random();
@@ -260,47 +288,38 @@ class CoalBall {
 
             this.eyeOffset = Math.sin(this.timer/40) * 6; 
         }
-        // --- SCARE (冲刺) 逻辑 ---
+
+        // 4. SCARE (冲刺/逃跑)
         else if (this.state === 'SCARE') {
-            // 如果不是为了躲藏而跑，就正常减速
             if (!this.isHidingRun) {
                 this.speed *= 0.96; 
-                if (this.speed < CONFIG.WANDER_SPEED + 1) {
-                    this.state = 'WANDER';
-                }
+                if (this.speed < CONFIG.WANDER_SPEED + 1) this.state = 'WANDER';
             } else {
-                // 如果是躲藏跑，不减速，保持高速冲出去！
-                // 并且检测是否已经跑出屏幕
+                // 躲藏模式：跑出屏幕检测
                 if (this.x < -100 || this.x > canvas.width + 100 || 
                     this.y < -100 || this.y > canvas.height + 100) {
-                    
-                    // 成功逃脱！进入躲藏状态
                     this.state = 'HIDDEN';
                     this.visible = false;
-                    SoundMgr.ensureStopped(); // 跑出去了就没声音了
-                    
-                    // 随机躲 2到5秒 (60fps * 2~5)
+                    SoundMgr.ensureStopped(); 
                     this.hiddenTimer = (2 + Math.random() * 3) * 60;
-                    console.log("躲藏中...", this.hiddenTimer);
                     return;
                 }
             }
-
-            // 掉渣粒子
             if (Math.random() > 0.4) particles.push(new Particle(this.x, this.y, this.isGold));
             this.eyeOffset = 0;
         }
 
-        // --- 音效同步 ---
-        // 注意：HIDDEN状态已经在上面return了，这里不用管
+        // --- 音效控制 ---
+        // 观察和进场慢爬时没声音，只有跑得快才有声音
         if (this.speed > CONFIG.STOP_SOUND_THRESHOLD) {
             SoundMgr.ensurePlaying();
         } else {
             SoundMgr.ensureStopped();
         }
 
-        // 物理移动
-        let wiggle = Math.sin(this.timer / 4) * 2;
+        // --- 物理移动 ---
+        // 观察状态不蠕动
+        let wiggle = (this.state === 'OBSERVING') ? 0 : Math.sin(this.timer / 4) * 2;
         this.x += Math.cos(this.angle) * this.speed - Math.sin(this.angle) * wiggle;
         this.y += Math.sin(this.angle) * this.speed + Math.cos(this.angle) * wiggle;
 
@@ -356,7 +375,6 @@ class CoalBall {
         
         if (dist < CONFIG.HIT_RADIUS) return 'HIT';
         if (dist < CONFIG.SCARE_RADIUS) {
-            // 触发冲刺（传入坐标，表示是被吓跑的）
             this.triggerSprint(ix, iy);
             return 'SCARE';
         }
@@ -375,8 +393,6 @@ function loop() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     let now = Date.now();
 
-    // 如果场上没有煤球（都被抓了），且重生时间到了，才生成新的
-    // 注意：如果是“躲藏”状态，coalBalls 数组里依然有对象，只是不显示，所以这里不会触发生成
     if (coalBalls.length < CONFIG.MAX_COUNT && now > nextSpawnTime) {
         coalBalls.push(new CoalBall());
     }
