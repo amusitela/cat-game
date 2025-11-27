@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>猫咪抓煤球</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #EBEBD3; 
+            background-image: radial-gradient(circle, #EBEBD3 20%, #CFCFBB 100%);
+            touch-action: none; /* 禁止默认触控，防止猫爪放大页面 */
+            -webkit-user-select: none;
+            user-select: none;
+            font-family: sans-serif;
+        }
+        #start-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(235, 235, 211, 0.95);
+            z-index: 100;
+        }
+        #loading-text { margin-bottom: 20px; color: #555; }
+        .btn {
+            background: #4CAF50; color: white;
+            padding: 20px 60px; font-size: 30px;
+            border-radius: 50px; border: none;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+
+<div id="start-screen">
+    <div id="loading-text">正在加载音频文件...</div>
+    <button class="btn" id="start-btn" style="display:none">开始游戏</button>
+</div>
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const startScreen = document.getElementById('start-screen');
+    const startBtn = document.getElementById('start-btn');
+    const loadingText = document.getElementById('loading-text');
+
+    // --- 1. 加载本地音频文件 ---
+    const audioFiles = {
+        appear: new Audio('./ap.MP3'),
+        move: new Audio('./move.MP3')
+    };
+
+    // 配置移动音频循环
+    audioFiles.move.loop = true;
+
+    // 检查加载状态
+    let loadedCount = 0;
+    const totalAudio = 2;
+
+    function checkLoad() {
+        loadedCount++;
+        if (loadedCount >= totalAudio) {
+            loadingText.innerText = "准备就绪！请确保 iPad 未静音";
+            startBtn.style.display = "block";
+        }
+    }
+
+    // 绑定加载事件 (兼容 iOS)
+    audioFiles.appear.addEventListener('canplaythrough', checkLoad, {once:true});
+    audioFiles.move.addEventListener('canplaythrough', checkLoad, {once:true});
+    // 容错：如果文件很小或者加载极快，直接显示按钮
+    setTimeout(() => {
+        if(startBtn.style.display === 'none') {
+            loadingText.innerText = "如无法点击开始，请检查文件名是否正确";
+            startBtn.style.display = "block";
+        }
+    }, 2000);
+
+    // --- 2. 合成被抓音效 (啾啾声) ---
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx;
+
+    function playCaughtSound() {
+        if (!audioCtx) return;
+        const t = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        
+        osc.frequency.setValueAtTime(1500, t);
+        osc.frequency.exponentialRampToValueAtTime(500, t + 0.15);
+        
+        gainNode.gain.setValueAtTime(0, t);
+        gainNode.gain.linearRampToValueAtTime(0.8, t + 0.01);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+        
+        osc.type = 'sine';
+        osc.start(t);
+        osc.stop(t + 0.2);
+    }
+
+    // --- 3. 游戏逻辑 ---
+    let gameRunning = false;
+    
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    const tadpole = {
+        x: -100, y: -100, targetX: 0, targetY: 0,
+        size: 35, tailPath: [],
+        state: 'HIDDEN', stateTimer: 0,
+        angle: 0, speed: 0,
+        
+        respawn: function() {
+            const side = Math.floor(Math.random() * 4);
+            if (side === 0) { this.x = -50; this.y = Math.random() * canvas.height; }
+            else if (side === 1) { this.x = canvas.width + 50; this.y = Math.random() * canvas.height; }
+            else if (side === 2) { this.x = Math.random() * canvas.width; this.y = -50; }
+            else { this.x = Math.random() * canvas.width; this.y = canvas.height + 50; }
+
+            this.tailPath = [];
+            for(let i=0; i<10; i++) this.tailPath.push({x: this.x, y: this.y});
+            
+            // 播放出现音频
+            audioFiles.appear.currentTime = 0;
+            audioFiles.appear.play().catch(e => console.log(e));
+
+            this.state = 'MOVING';
+            this.pickNewTarget();
+        },
+
+        pickNewTarget: function() {
+            this.targetX = Math.random() * (canvas.width - 100) + 50;
+            this.targetY = Math.random() * (canvas.height - 100) + 50;
+            const dx = this.targetX - this.x;
+            const dy = this.targetY - this.y;
+            this.angle = Math.atan2(dy, dx);
+            this.speed = Math.random() * 6 + 10; 
+            
+            // 播放移动音频
+            if (audioFiles.move.paused) {
+                audioFiles.move.play().catch(e=>{});
+            }
+        },
+
+        update: function() {
+            if (this.state === 'HIDDEN') {
+                this.stateTimer--;
+                if (this.stateTimer <= 0) this.respawn();
+                return;
+            }
+            this.tailPath.unshift({x: this.x, y: this.y});
+            if (this.tailPath.length > 15) this.tailPath.pop();
+
+            if (this.state === 'MOVING') {
+                const dx = this.targetX - this.x;
+                const dy = this.targetY - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist < 15) {
+                    this.enterIdle();
+                } else {
+                    this.x += Math.cos(this.angle) * this.speed;
+                    this.y += Math.sin(this.angle) * this.speed;
+                }
+            } else if (this.state === 'IDLE') {
+                this.stateTimer--;
+                if (this.stateTimer <= 0) {
+                    if (Math.random() < 0.2) this.vanish(false);
+                    else {
+                        this.state = 'MOVING';
+                        this.pickNewTarget();
+                    }
+                }
+            }
+        },
+        
+        enterIdle: function() {
+            this.state = 'IDLE';
+            this.stateTimer = Math.random() * 40 + 30;
+            audioFiles.move.pause(); // 停下时停止音效
+            audioFiles.move.currentTime = 0;
+        },
+
+        draw: function() {
+            if (this.state === 'HIDDEN') return;
+            // 尾巴
+            ctx.beginPath(); ctx.strokeStyle = 'black'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            if (this.tailPath.length > 2) {
+                ctx.moveTo(this.tailPath[0].x, this.tailPath[0].y);
+                for (let i = 1; i < this.tailPath.length - 2; i++) {
+                    const xc = (this.tailPath[i].x + this.tailPath[i+1].x) / 2;
+                    const yc = (this.tailPath[i].y + this.tailPath[i+1].y) / 2;
+                    ctx.quadraticCurveTo(this.tailPath[i].x, this.tailPath[i].y, xc, yc);
+                }
+                ctx.lineTo(this.tailPath[this.tailPath.length-1].x, this.tailPath[this.tailPath.length-1].y);
+            }
+            ctx.stroke();
+            // 身体
+            ctx.fillStyle = 'black'; ctx.beginPath();
+            const jitter = (this.state === 'MOVING') ? Math.random() * 2 : 0;
+            ctx.arc(this.x + jitter, this.y + jitter, this.size, 0, Math.PI * 2); ctx.fill();
+            // 眼睛
+            ctx.fillStyle = 'white'; ctx.beginPath();
+            ctx.arc(this.x - 12, this.y - 8, 11, 0, Math.PI * 2);
+            ctx.arc(this.x + 12, this.y - 8, 11, 0, Math.PI * 2); ctx.fill();
+            // 瞳孔
+            const lx = Math.cos(this.angle) * 4, ly = Math.sin(this.angle) * 4;
+            ctx.fillStyle = 'black'; ctx.beginPath();
+            ctx.arc(this.x - 12 + lx, this.y - 8 + ly, 4, 0, Math.PI * 2);
+            ctx.arc(this.x + 12 + lx, this.y - 8 + ly, 4, 0, Math.PI * 2); ctx.fill();
+        },
+
+        vanish: function(caught) {
+            if (caught) playCaughtSound();
+            audioFiles.move.pause();
+            audioFiles.move.currentTime = 0;
+            this.state = 'HIDDEN';
+            this.stateTimer = 50; 
+        },
+        
+        checkHit: function(inputX, inputY) {
+            if (this.state === 'HIDDEN') return false;
+            if (Math.hypot(inputX - this.x, inputY - this.y) < this.size + 40) {
+                this.vanish(true);
+                createRipple(this.x, this.y);
+                return true;
+            }
+            return false;
+        }
+    };
+
+    let ripples = [];
+    function createRipple(x, y) { ripples.push({x: x, y: y, r: 10, alpha: 1}); }
+    function drawRipples() {
+        for (let i = ripples.length - 1; i >= 0; i--) {
+            let r = ripples[i]; r.r += 4; r.alpha -= 0.04;
+            if (r.alpha <= 0) ripples.splice(i, 1);
+            else { ctx.strokeStyle = `rgba(0,0,0,${r.alpha})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI*2); ctx.stroke(); }
+        }
+    }
+
+    function loop() {
+        if (!gameRunning) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        tadpole.update(); tadpole.draw(); drawRipples();
+        requestAnimationFrame(loop);
+    }
+
+    canvas.addEventListener('touchstart', e => {
+        e.preventDefault();
+        for (let i=0; i<e.touches.length; i++) {
+            const hit = tadpole.checkHit(e.touches[i].clientX, e.touches[i].clientY);
+            if(!hit) createRipple(e.touches[i].clientX, e.touches[i].clientY);
+        }
+    }, {passive: false});
+
+    startBtn.addEventListener('click', () => {
+        // 解锁 iOS 音频上下文
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        
+        startScreen.style.display = 'none';
+        gameRunning = true;
+        tadpole.respawn();
+        loop();
+    });
+</script>
+</body>
+</html>
